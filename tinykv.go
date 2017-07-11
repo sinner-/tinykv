@@ -38,23 +38,28 @@ func handleClient(conn net.Conn) {
     for {
         message, err := bufio.NewReader(conn).ReadString('\n')
         if err != nil {
-            log.Print(err.Error())
+            if err.Error() == "EOF" {
+                log.Printf("Client %s disconnected.", conn.RemoteAddr())
+            } else {
+                log.Printf("Read error from client %s - ", conn.RemoteAddr(), err.Error())
+            }
             conn.Close()
             break
         }
 
         message = strings.TrimSpace(message)
         if !commandPattern.MatchString(message) {
-            log.Print(fmt.Sprintf("Invalid command: %s.", message))
+            log.Printf("Invalid command: %s.", message)
             conn.Close()
             break
         }
 
+        log.Printf("%s - %s", conn.RemoteAddr(), message)
         messageComponents := strings.Split(message, " ")
         switch messageComponents[0] {
             case "PUT":
                 if !putPattern.MatchString(message) {
-                    log.Print(fmt.Sprintf("Invalid command: %s.", message))
+                    log.Printf("Invalid command: %s.", message)
                     conn.Close()
                     break
                 }
@@ -62,21 +67,21 @@ func handleClient(conn net.Conn) {
                 writeQueue <- queueItem{k: messageComponents[1], v: messageComponents[2] }
             case "GET":
                 if !getPattern.MatchString(message) {
-                    log.Print(fmt.Sprintf("Invalid command: %s.", message))
+                    log.Printf("Invalid command: %s.", message)
                     conn.Close()
                     break
                 }
                 conn.Write([]byte(fmt.Sprintf("%s\n", kvStore[messageComponents[1]])))
            case "DEL":
                 if !delPattern.MatchString(message) {
-                    log.Print(fmt.Sprintf("Invalid command: %s.", message))
+                    log.Printf("Invalid command: %s.", message)
                     conn.Close()
                     break
                 }
                 writeQueue <- queueItem{k: messageComponents[1], v: "" }
            case "LIST":
                 if !listPattern.MatchString(message) {
-                    log.Print(fmt.Sprintf("Invalid command: %s.", message))
+                    log.Printf("Invalid command: %s.", message)
                     conn.Close()
                     break
                 }
@@ -102,6 +107,7 @@ func main() {
             continue
         }
 
+        log.Print("New connection from: ", conn.RemoteAddr())
         go handleClient(conn)
     }
 }
