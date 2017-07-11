@@ -9,12 +9,30 @@ import (
     "strings"
 )
 
+type queueItem struct {
+    k string
+    v string
+}
+
+var QUEUE_BUFFER_SIZE = 10
 var commandPattern = regexp.MustCompile("^(PUT|GET|DEL|LIST)")
 var putPattern = regexp.MustCompile("^PUT [\x00-\x7F]{1,255} [\x00-\x7F]{1,255}$")
 var getPattern = regexp.MustCompile("^GET [\x00-\x7F]{1,255}$")
 var delPattern = regexp.MustCompile("^DEL [\x00-\x7F]{1,255}$")
 var listPattern = regexp.MustCompile("^LIST$")
 var kvStore = make(map[string]string)
+var writeQueue = make(chan queueItem, QUEUE_BUFFER_SIZE)
+
+func processQueue() {
+    for {
+        item := <-writeQueue
+        if item.v != "" {
+            kvStore[item.k] = item.v
+        } else {
+            delete(kvStore, item.k)
+        }
+    }
+}
 
 func handleClient(conn net.Conn) {
     for {
@@ -41,7 +59,7 @@ func handleClient(conn net.Conn) {
                     break
                 }
 
-                kvStore[messageComponents[1]] = messageComponents[2]
+                writeQueue <- queueItem{k: messageComponents[1], v: messageComponents[2] }
             case "GET":
                 if !getPattern.MatchString(message) {
                     log.Print(fmt.Sprintf("Invalid command: %s.", message))
@@ -55,7 +73,7 @@ func handleClient(conn net.Conn) {
                     conn.Close()
                     break
                 }
-                delete(kvStore, messageComponents[1])
+                writeQueue <- queueItem{k: messageComponents[1], v: "" }
            case "LIST":
                 if !listPattern.MatchString(message) {
                     log.Print(fmt.Sprintf("Invalid command: %s.", message))
@@ -74,6 +92,8 @@ func main() {
     if err != nil {
         log.Fatal(err.Error())
     }
+
+    go processQueue()
 
     for {
         conn, err := listener.Accept()
