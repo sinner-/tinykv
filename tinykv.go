@@ -5,89 +5,101 @@ import (
     "fmt"
     "log"
     "bufio"
-    "regexp"
     "strings"
+    "sync"
+    "io"
 )
 
-type queueItem struct {
-    k string
-    v string
+var (
+    kvStore = make(map[string]string)
+    lock = sync.RWMutex{}
+)
+
+func kvGet(k string, conn net.Conn) string {
+    lock.RLock()
+    defer lock.RUnlock()
+
+    return kvStore[k]
 }
 
-var QUEUE_BUFFER_SIZE = 10
-var commandPattern = regexp.MustCompile("^(PUT|GET|DEL|LIST)")
-var putPattern = regexp.MustCompile("^PUT [\x00-\x7F]{1,255} [\x00-\x7F]{1,255}$")
-var getPattern = regexp.MustCompile("^GET [\x00-\x7F]{1,255}$")
-var delPattern = regexp.MustCompile("^DEL [\x00-\x7F]{1,255}$")
-var listPattern = regexp.MustCompile("^LIST$")
-var kvStore = make(map[string]string)
-var writeQueue = make(chan queueItem, QUEUE_BUFFER_SIZE)
+func kvList(w io.Writer) error {
+    lock.RLock()
+    defer lock.RUnlock()
 
-func processQueue() {
-    for {
-        item := <-writeQueue
-        if item.v != "" {
-            kvStore[item.k] = item.v
-        } else {
-            delete(kvStore, item.k)
+    for k, v := range kvStore {
+        _, err := w.Write([]byte(fmt.Sprintf("%s: %s\n", k, v)))
+        if err != nil {
+            return err
         }
+    }
+
+    return nil
+}
+
+func kvSet(k string, v string) {
+    lock.Lock()
+    defer lock.Unlock()
+
+    if v == "" {
+        delete(kvStore, k)
+    } else {
+        kvStore[k] = v
     }
 }
 
 func handleClient(conn net.Conn) {
+    defer conn.Close()
+
+    reader := bufio.NewReader(conn)
+
     for {
-        message, err := bufio.NewReader(conn).ReadString('\n')
+        message, err := reader.ReadString('\n')
         if err != nil {
-            if err.Error() == "EOF" {
+            if err == io.EOF {
                 log.Printf("Client %s disconnected.", conn.RemoteAddr())
             } else {
                 log.Printf("Read error from client %s - ", conn.RemoteAddr(), err.Error())
             }
-            conn.Close()
-            break
+            return
         }
 
         message = strings.TrimSpace(message)
-        if !commandPattern.MatchString(message) {
-            log.Printf("Invalid command: %s.", message)
-            conn.Close()
-            break
-        }
-
         log.Printf("%s - %s", conn.RemoteAddr(), message)
         messageComponents := strings.Split(message, " ")
         switch messageComponents[0] {
             case "PUT":
-                if !putPattern.MatchString(message) {
-                    log.Printf("Invalid command: %s.", message)
-                    conn.Close()
-                    break
+                if len(messageComponents) != 3 {
+                    log.Printf("Invalid command %s from %s.", message, conn.RemoteAddr())
+                    return
                 }
-
-                writeQueue <- queueItem{k: messageComponents[1], v: messageComponents[2] }
+                kvSet(messageComponents[1], messageComponents[2])
             case "GET":
-                if !getPattern.MatchString(message) {
-                    log.Printf("Invalid command: %s.", message)
-                    conn.Close()
-                    break
+                if len(messageComponents) != 2 {
+                    log.Printf("Invalid command %s from %s.", message, conn.RemoteAddr())
+                    return
                 }
-                conn.Write([]byte(fmt.Sprintf("%s\n", kvStore[messageComponents[1]])))
+                _, err = conn.Write([]byte(fmt.Sprintf("%s\n", kvStore[messageComponents[1]])))
+                if err != nil {
+                    log.Print("Error sending response.")
+                }
            case "DEL":
-                if !delPattern.MatchString(message) {
-                    log.Printf("Invalid command: %s.", message)
-                    conn.Close()
-                    break
+                if len(messageComponents) != 2 {
+                    log.Printf("Invalid command %s from %s.", message, conn.RemoteAddr())
+                    return
                 }
-                writeQueue <- queueItem{k: messageComponents[1], v: "" }
+                kvSet(messageComponents[1], "")
            case "LIST":
-                if !listPattern.MatchString(message) {
-                    log.Printf("Invalid command: %s.", message)
-                    conn.Close()
-                    break
+                if len(messageComponents) != 1 {
+                    log.Printf("Invalid command %s from %s.", message, conn.RemoteAddr())
+                    return
                 }
-                for k, v := range kvStore {
-                    conn.Write([]byte(fmt.Sprintf("%s: %s\n", k, v)))
+                err = kvList(conn)
+                if err != nil {
+                    log.Print("Error sending response.")
                 }
+           default:
+               log.Printf("Invalid command %s from %s.", message, conn.RemoteAddr())
+               return
         }
     }
 }
@@ -97,8 +109,6 @@ func main() {
     if err != nil {
         log.Fatal(err.Error())
     }
-
-    go processQueue()
 
     for {
         conn, err := listener.Accept()
